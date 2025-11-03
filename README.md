@@ -41,7 +41,7 @@ Start the frontend development server
 
 `npm start`
 
-The frontend will run at http://localhost:3000/.
+The frontend will run at http://localhost:5173/.
 
 ## 📸 Screenshots
 
