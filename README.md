@@ -43,7 +43,9 @@ Start the frontend development server
 
 The frontend will run at http://localhost:5173/.
 
-## 📸 Screenshots
+## 📸 Screenshots and Demo Video
+
+## [ DEMO VIDEO LINK HERE ](https://drive.google.com/file/d/1FvnrCqymeXM1GNa_zzkA2iLlenkALuOS/view?usp=sharing)
 
 ![ChatScreen](./screenshots/chatScreen.png)
 
@@ -60,3 +62,29 @@ The frontend will run at http://localhost:5173/.
 ![ChatScreen](./screenshots/QueryResults.png)
 
 ![ChatScreen](./screenshots/Analytics.png)
+
+## AI Chatbot Project - Complete Features Checklist
+
+# Conversation Management
+✅ End conversations with auto-summary  
+✅ Auto-generate conversation titles  
+✅ Store all conversations in PostgreSQL  
+✅ View conversation history  
+✅ Track conversation status (active/ended)  
+✅ Timestamp tracking (start/end)  
+
+# Real-time AI Chat
+✅ Send messages to AI assistant  
+✅ Real-time streaming responses (character-by-character)  
+✅ Context-aware AI (remembers conversation history)  
+✅ Powered by Google Gemini API  
+✅ Cancel streaming mid-response  
+✅ Streaming indicator with visual feedback  
+✅ Blinking cursor animation during streaming  
+
+# Message Features
+✅ Track sender (user/ai)  
+✅ Message history per conversation  
+✅ Display message count per conversation  
+✅ Conversation duration tracking  
+✅ Optimistic UI updates  
