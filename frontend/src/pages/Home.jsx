@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  Send, MessageSquare, Search, Trash2, Download, Moon, Sun, Mic, 
-  BookmarkPlus, TrendingUp, Share2, Plus, X, ChevronDown, Clock, 
-  Sparkles, FileText, Archive, User, Bot, Menu, Settings, 
-  Bookmark, Filter, Calendar, BarChart3, Zap
+  Send, MessageSquare, Search, Download, Moon, Sun, Mic, 
+  TrendingUp, Share2, Plus, X, Clock, 
+  Sparkles, FileText, Archive, User, Bot, Menu,
+  Bookmark, Calendar, BarChart3, Zap, ChevronRight
 } from 'lucide-react';
 
 const API_BASE_URL = 'http://127.0.0.1:8000/api/chat';
@@ -22,7 +22,6 @@ const AIChatbot = () => {
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [bookmarkedMessages, setBookmarkedMessages] = useState(new Set());
   const [isRecording, setIsRecording] = useState(false);
-  const [showShareModal, setShowShareModal] = useState(false);
   const [analysisDepth, setAnalysisDepth] = useState('basic');
   const [dateRange, setDateRange] = useState({ start: '', end: '' });
   const [keywords, setKeywords] = useState('');
@@ -84,10 +83,25 @@ const AIChatbot = () => {
     setInputMessage('');
     setLoading(true);
 
-    setMessages(prev => [...prev, { sender: 'user', content: userMessage, timestamp: new Date() }]);
+    // Add user message immediately
+    const userMsgObj = { 
+      sender: 'user', 
+      content: userMessage, 
+      timestamp: new Date() 
+    };
+    setMessages(prev => [...prev, userMsgObj]);
+
+    // Add placeholder AI message with empty content
+    const aiMsgPlaceholder = {
+      sender: 'ai',
+      content: '',
+      timestamp: new Date(),
+      isStreaming: true
+    };
+    setMessages(prev => [...prev, aiMsgPlaceholder]);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/send-message/`, {
+      const response = await fetch(`${API_BASE_URL}/send-message-stream/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -96,27 +110,87 @@ const AIChatbot = () => {
         })
       });
 
-      const data = await response.json();
-      
-      if (data.success) {
-        if (!currentConversation) {
-          setCurrentConversation({ id: data.conversation_id });
-        }
+      if (!response.ok) {
+        throw new Error('Stream request failed');
+      }
 
-        setMessages(prev => {
-          const filtered = prev.filter(m => m.sender !== 'user' || m.content !== userMessage);
-          return [
-            ...filtered,
-            { ...data.user_message, sender: 'user' },
-            { ...data.ai_response, sender: 'ai' }
-          ];
-        });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let aiMessageContent = '';
+      let conversationId = null;
+      let aiMessageId = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
         
-        showNotification('Message sent!');
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+
+              if (data.type === 'start') {
+                conversationId = data.conversation_id;
+                aiMessageId = data.ai_message_id;
+                
+                if (!currentConversation) {
+                  setCurrentConversation({ id: conversationId });
+                }
+              } else if (data.type === 'chunk') {
+                // Append chunk to AI message content
+                aiMessageContent += data.content;
+                
+                // Update the last message (AI message) with new content
+                setMessages(prev => {
+                  const newMessages = [...prev];
+                  const lastMessage = newMessages[newMessages.length - 1];
+                  if (lastMessage.sender === 'ai') {
+                    lastMessage.content = aiMessageContent;
+                    lastMessage.isStreaming = true;
+                  }
+                  return newMessages;
+                });
+              } else if (data.type === 'done') {
+                // Mark streaming as complete
+                setMessages(prev => {
+                  const newMessages = [...prev];
+                  const lastMessage = newMessages[newMessages.length - 1];
+                  if (lastMessage.sender === 'ai') {
+                    lastMessage.content = data.full_content;
+                    lastMessage.timestamp = new Date(data.timestamp);
+                    lastMessage.isStreaming = false;
+                  }
+                  return newMessages;
+                });
+                showNotification('Message sent!');
+              } else if (data.type === 'error') {
+                showNotification('AI response error', 'error');
+                setMessages(prev => {
+                  const newMessages = [...prev];
+                  const lastMessage = newMessages[newMessages.length - 1];
+                  if (lastMessage.sender === 'ai') {
+                    lastMessage.content = data.error;
+                    lastMessage.isStreaming = false;
+                  }
+                  return newMessages;
+                });
+              }
+            } catch (e) {
+              console.error('Error parsing SSE data:', e);
+            }
+          }
+        }
       }
     } catch (error) {
       console.error('Error sending message:', error);
       showNotification('Failed to send message', 'error');
+      
+      // Remove the AI placeholder message on error
+      setMessages(prev => prev.filter(m => !m.isStreaming));
     } finally {
       setLoading(false);
     }
@@ -220,24 +294,11 @@ const AIChatbot = () => {
     URL.revokeObjectURL(url);
   };
 
-  const toggleBookmark = (messageId) => {
-    setBookmarkedMessages(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(messageId)) {
-        newSet.delete(messageId);
-      } else {
-        newSet.add(messageId);
-      }
-      return newSet;
-    });
-  };
-
   const shareConversation = () => {
     if (!selectedConversation) return;
     const shareUrl = `${window.location.origin}/conversation/${selectedConversation.id}`;
     navigator.clipboard.writeText(shareUrl);
     showNotification('Share link copied to clipboard!');
-    setShowShareModal(false);
   };
 
   const toggleVoiceInput = () => {
@@ -273,176 +334,252 @@ const AIChatbot = () => {
 
   const analytics = calculateAnalytics();
 
-  return (
-    <div className={`min-h-screen ${darkMode ? 'bg-gray-900' : 'bg-white'} transition-colors duration-300 flex`}>
-      {/* Sidebar */}
-      <div className={`${sidebarOpen ? 'w-80' : 'w-20'} ${darkMode ? 'bg-gray-800' : 'bg-gray-50'} transition-all duration-300 flex flex-col h-screen sticky top-0`}>
-        {/* New Chat Button */}
-        <div className="p-4 border-b border-gray-700">
-          <button
-            onClick={startNewConversation}
-            className="w-full flex items-center justify-center gap-3 px-4 py-3 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-lg hover:opacity-90 transition-all duration-200 shadow-lg"
-          >
-            {sidebarOpen ? (
-              <>
-                <Plus className="w-5 h-5" />
-                <span className="font-medium">New Chat</span>
-              </>
-            ) : (
-              <Plus className="w-5 h-5" />
-            )}
-          </button>
-        </div>
+  const formatQueryAnswer = (answerText) => {
+    if (!answerText) return null;
 
-        {/* Navigation */}
-        <div className="flex-1 p-4 space-y-2">
-          {[
-            { id: 'chat', label: 'Chat', icon: MessageSquare },
-            { id: 'history', label: 'History', icon: Archive },
-            { id: 'query', label: 'Query', icon: Search },
-            { id: 'analytics', label: 'Analytics', icon: BarChart3 }
-          ].map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`w-full flex items-center gap-3 px-3 py-3 rounded-lg transition-all duration-200 ${
-                activeTab === tab.id
-                  ? darkMode
-                    ? 'bg-gray-700 text-white shadow-lg'
-                    : 'bg-white text-gray-900 shadow-lg border'
-                  : darkMode
-                    ? 'text-gray-400 hover:bg-gray-750 hover:text-white'
-                    : 'text-gray-600 hover:bg-white hover:text-gray-900'
-              }`}
-            >
-              <tab.icon className="w-5 h-5 flex-shrink-0" />
-              {sidebarOpen && <span className="font-medium">{tab.label}</span>}
-            </button>
-          ))}
-        </div>
-
-        {/* User Section */}
-        <div className="p-4 border-t border-gray-700">
-          <div className="flex items-center gap-3 p-3 rounded-lg bg-gray-750">
-            <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
-              <User className="w-4 h-4 text-white" />
-            </div>
-            {sidebarOpen && (
-              <div className="flex-1 min-w-0">
-                <p className="text-white text-sm font-medium truncate">User</p>
-                <p className="text-gray-400 text-xs truncate">Free Plan</p>
+    const parts = answerText.split(/(\d+\.\s+\*\*.*?\*\*)/g);
+    
+    return parts.map((part, index) => {
+      const numberedMatch = part.match(/^(\d+)\.\s+\*\*(.*?)\*\*\s*-\s*(.*)$/);
+      if (numberedMatch) {
+        const [, number, title, content] = numberedMatch;
+        return (
+          <div key={index} className="backdrop-blur-xl bg-white/5 border border-white/10 rounded-2xl p-5 hover:bg-white/10 transition-all duration-300">
+            <div className="flex items-start gap-4">
+              <div className="w-8 h-8 bg-gradient-to-br from-violet-500 to-sky-600 rounded-xl flex items-center justify-center flex-shrink-0 shadow-lg">
+                <span className="text-sm font-bold text-white">{number}</span>
               </div>
-            )}
+              <div className="flex-1">
+                <h4 className="font-semibold text-white mb-2">{title}</h4>
+                <p className="text-white/70 text-sm leading-relaxed">{content}</p>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      const boldProcessed = part.split(/(\*\*.*?\*\*)/g).map((segment, segIndex) => {
+        if (segment.startsWith('**') && segment.endsWith('**')) {
+          const boldText = segment.slice(2, -2);
+          return (
+            <span key={segIndex} className="font-semibold text-violet-300">
+              {boldText}
+            </span>
+          );
+        }
+        return segment;
+      });
+
+      if (part.trim() && !part.match(/^\d+\./)) {
+        return (
+          <p key={index} className="text-white/80 leading-relaxed">
+            {boldProcessed}
+          </p>
+        );
+      }
+
+      return null;
+    }).filter(Boolean);
+  };
+
+  return (
+    <div className={`min-h-screen ${darkMode ? 'bg-gradient-to-br from-slate-900 via-sky-900 to-slate-900' : 'bg-gradient-to-br from-gray-50 via-blue-50 to-gray-50'} transition-all duration-500 flex overflow-hidden`}>
+      {/* Animated Background */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className={`absolute -top-1/2 -right-1/2 w-full h-full rounded-full ${darkMode ? 'bg-sky-500/10' : 'bg-blue-200/30'} blur-3xl animate-pulse`}></div>
+        <div className={`absolute -bottom-1/2 -left-1/2 w-full h-full rounded-full ${darkMode ? 'bg-blue-500/10' : 'bg-sky-200/30'} blur-3xl animate-pulse`} style={{animationDelay: '1s'}}></div>
+      </div>
+
+      {/* Sidebar */}
+      <div className={`${sidebarOpen ? 'w-72' : 'w-20'} transition-all duration-500 flex flex-col h-screen sticky top-0 z-40 relative`}>
+        <div className="absolute inset-0 backdrop-blur-2xl bg-white/5 border-r border-white/10"></div>
+        
+        <div className="relative z-10 flex flex-col h-full">
+          {/* Logo & New Chat */}
+          <div className="p-5">
+            <button
+              onClick={startNewConversation}
+              className="w-full group relative overflow-hidden bg-gradient-to-r from-violet-600 to-sky-600 hover:from-violet-500 hover:to-sky-500 text-white rounded-2xl transition-all duration-300 shadow-xl shadow-sky-500/25 hover:shadow-sky-500/40 hover:scale-105"
+            >
+              <div className="absolute inset-0 bg-gradient-to-r from-white/0 via-white/20 to-white/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-1000"></div>
+              <div className="relative flex items-center justify-center gap-3 px-5 py-3.5">
+                {sidebarOpen ? (
+                  <>
+                    <Plus className="w-5 h-5" />
+                    <span className="font-medium">New Chat</span>
+                  </>
+                ) : (
+                  <Plus className="w-5 h-5" />
+                )}
+              </div>
+            </button>
+          </div>
+
+          {/* Navigation */}
+          <div className="flex-1 px-3 space-y-2 overflow-y-auto">
+            {[
+              { id: 'chat', label: 'Chat', icon: MessageSquare, gradient: 'from-blue-500 to-cyan-500' },
+              { id: 'history', label: 'History', icon: Archive, gradient: 'from-violet-500 to-sky-500' },
+              { id: 'query', label: 'Query', icon: Search, gradient: 'from-pink-500 to-rose-500' },
+              { id: 'analytics', label: 'Analytics', icon: BarChart3, gradient: 'from-amber-500 to-orange-500' }
+            ].map(tab => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`w-full group relative overflow-hidden rounded-2xl transition-all duration-300 ${
+                  activeTab === tab.id
+                    ? 'bg-white/10 shadow-lg shadow-sky-500/20'
+                    : 'hover:bg-white/5'
+                }`}
+              >
+                {activeTab === tab.id && (
+                  <div className={`absolute inset-0 bg-gradient-to-r ${tab.gradient} opacity-20`}></div>
+                )}
+                <div className="relative flex items-center gap-3 px-4 py-3.5">
+                  <tab.icon className={`w-5 h-5 transition-all duration-300 ${
+                    activeTab === tab.id ? 'text-white' : 'text-white/50 group-hover:text-white/80'
+                  }`} />
+                  {sidebarOpen && (
+                    <span className={`font-medium transition-all duration-300 ${
+                      activeTab === tab.id ? 'text-white' : 'text-white/50 group-hover:text-white/80'
+                    }`}>
+                      {tab.label}
+                    </span>
+                  )}
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* User Section */}
+          <div className="p-5 border-t border-white/10">
+            <div className="backdrop-blur-xl bg-white/5 rounded-2xl p-3 hover:bg-white/10 transition-all duration-300">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-gradient-to-br from-violet-500 to-sky-600 rounded-xl flex items-center justify-center shadow-lg">
+                  <User className="w-5 h-5 text-white" />
+                </div>
+                {sidebarOpen && (
+                  <div className="flex-1 min-w-0">
+                    <p className="text-white text-sm font-medium truncate">User</p>
+                    <p className="text-white/50 text-xs truncate">Free Plan</p>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col relative">
         {/* Header */}
-        <header className={`${darkMode ? 'bg-gray-800' : 'bg-white'} border-b border-gray-200 sticky top-0 z-40`}>
-          <div className="flex items-center justify-between p-4">
+        <header className="relative z-30">
+          <div className="absolute inset-0 backdrop-blur-2xl bg-white/5 border-b border-white/10"></div>
+          <div className="relative flex items-center justify-between p-5">
             <div className="flex items-center gap-4">
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}
-                className={`p-2 rounded-lg transition-colors ${
-                  darkMode ? 'hover:bg-gray-700 text-gray-300' : 'hover:bg-gray-100 text-gray-600'
-                }`}
+                className="p-2.5 rounded-xl backdrop-blur-xl bg-white/5 hover:bg-white/10 transition-all duration-300 text-white/70 hover:text-white"
               >
                 <Menu className="w-5 h-5" />
               </button>
-              <h1 className={`text-xl font-semibold ${darkMode ? 'text-white' : 'text-gray-900'}`}>
+              <h1 className="text-xl font-bold bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent">
                 {activeTab === 'chat' && 'Chat'}
                 {activeTab === 'history' && 'History'}
-                {activeTab === 'query' && 'Query Conversations'}
+                {activeTab === 'query' && 'Query'}
                 {activeTab === 'analytics' && 'Analytics'}
               </h1>
             </div>
             
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setDarkMode(!darkMode)}
-                className={`p-2 rounded-lg transition-colors ${
-                  darkMode ? 'hover:bg-gray-700 text-yellow-400' : 'hover:bg-gray-100 text-gray-600'
-                }`}
-              >
-                {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-              </button>
-            </div>
+            <button
+              onClick={() => setDarkMode(!darkMode)}
+              className="p-2.5 rounded-xl backdrop-blur-xl bg-white/5 hover:bg-white/10 transition-all duration-300 text-amber-400 hover:text-amber-300"
+            >
+              {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+            </button>
           </div>
         </header>
 
         {/* Main Content Area */}
-        <main className="flex-1 overflow-hidden">
+        <main className="flex-1 overflow-hidden relative">
           {/* Chat Tab */}
           {activeTab === 'chat' && (
-            <div className="flex flex-col h-full mx-auto">
+            <div className="flex flex-col h-full">
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
+              <div className="flex-1 overflow-y-auto px-6 py-8 space-y-6">
                 {messages.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center h-full text-center space-y-6">
-                    <div className="w-20 h-20 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center shadow-2xl">
-                      <Sparkles className="w-10 h-10 text-white" />
+                  <div className="flex flex-col items-center justify-center h-full text-center space-y-8 max-w-2xl mx-auto">
+                    <div className="relative">
+                      <div className="absolute inset-0 bg-gradient-to-r from-violet-600 to-sky-600 rounded-full blur-2xl opacity-50 animate-pulse"></div>
+                      <div className="relative w-24 h-24 bg-gradient-to-br from-violet-600 to-sky-600 rounded-3xl flex items-center justify-center shadow-2xl">
+                        <Sparkles className="w-12 h-12 text-white" />
+                      </div>
                     </div>
-                    <div className="space-y-2">
-                      <h2 className="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
+                    <div className="space-y-3">
+                      <h2 className="text-4xl font-bold bg-gradient-to-r from-white via-violet-200 to-sky-200 bg-clip-text text-transparent">
                         How can I help you today?
                       </h2>
-                      <p className={`text-lg ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                      <p className="text-lg text-white/60">
                         Start a conversation and I'll assist you with anything you need.
                       </p>
                     </div>
                   </div>
                 ) : (
-                  messages.map((msg, idx) => (
-                    <div key={idx} className={`flex gap-4 ${msg.sender === 'user' ? 'flex-row-reverse' : ''}`}>
-                      <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
-                        msg.sender === 'user' 
-                          ? 'bg-blue-500' 
-                          : 'bg-gradient-to-r from-purple-500 to-pink-500'
-                      }`}>
-                        {msg.sender === 'user' ? (
-                          <User className="w-4 h-4 text-white" />
-                        ) : (
-                          <Bot className="w-4 h-4 text-white" />
-                        )}
-                      </div>
-                      <div className={`flex-1 max-w-[80%] ${msg.sender === 'user' ? 'text-right' : ''}`}>
-                        <div className={`inline-block px-4 py-3 rounded-2xl ${
-                          msg.sender === 'user'
-                            ? 'bg-blue-500 text-white rounded-br-none'
-                            : darkMode
-                              ? 'bg-gray-800 text-gray-100 rounded-bl-none border border-gray-700'
-                              : 'bg-gray-50 text-gray-900 rounded-bl-none border'
+                  <div className="max-w-4xl mx-auto space-y-6">
+                    {messages.map((msg, idx) => (
+                      <div key={idx} className={`flex gap-4 ${msg.sender === 'user' ? 'flex-row-reverse' : ''} animate-fade-in`}>
+                        <div className={`w-10 h-10 rounded-2xl flex items-center justify-center flex-shrink-0 shadow-lg ${
+                          msg.sender === 'user' 
+                            ? 'bg-gradient-to-br from-blue-500 to-cyan-500' 
+                            : 'bg-gradient-to-br from-violet-500 to-sky-600'
                         }`}>
-                          <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                          {msg.sender === 'user' ? (
+                            <User className="w-5 h-5 text-white" />
+                          ) : (
+                            <Bot className="w-5 h-5 text-white" />
+                          )}
                         </div>
-                        {msg.timestamp && (
-                          <p className={`text-xs mt-2 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                            {new Date(msg.timestamp).toLocaleTimeString()}
-                          </p>
-                        )}
+                        <div className={`flex-1 max-w-[75%] ${msg.sender === 'user' ? 'text-right' : ''}`}>
+                          <div className={`inline-block backdrop-blur-2xl rounded-3xl shadow-xl transition-all duration-300 hover:scale-[1.02] ${
+                            msg.sender === 'user'
+                              ? 'bg-gradient-to-br from-blue-500/90 to-cyan-500/90 text-white rounded-br-md border border-blue-400/20'
+                              : 'bg-white/10 text-white rounded-bl-md border border-white/10'
+                          }`}>
+                            <p className="px-6 py-4 text-sm leading-relaxed whitespace-pre-wrap">
+                              {msg.content}
+                              {msg.isStreaming && (
+                                <span className="inline-block w-1.5 h-4 bg-white/80 ml-1 animate-pulse"></span>
+                              )}
+                            </p>
+                          </div>
+                          {msg.timestamp && !msg.isStreaming && (
+                            <p className="text-xs mt-2 text-white/40">
+                              {new Date(msg.timestamp).toLocaleTimeString()}
+                            </p>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))
+                    ))}
+                  </div>
                 )}
                 <div ref={messagesEndRef} />
               </div>
 
               {/* Input Area */}
-              <div className="p-4 border-t border-gray-200 dark:border-gray-700">
-                <div className="max-w-3xl mx-auto">
+              <div className="relative z-20 p-6">
+                <div className="absolute inset-0 backdrop-blur-2xl bg-white/5 border-t border-white/10"></div>
+                <div className="relative max-w-4xl mx-auto space-y-4">
                   {currentConversation && (
                     <button
                       onClick={endConversation}
                       disabled={loading}
-                      className="w-full mb-4 px-4 py-2 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 text-sm font-medium shadow-lg"
+                      className="w-full backdrop-blur-xl bg-gradient-to-r from-rose-500/80 to-pink-500/80 hover:from-rose-500 hover:to-pink-500 text-white rounded-2xl px-5 py-3 transition-all duration-300 disabled:opacity-50 text-sm font-medium shadow-lg shadow-rose-500/25 hover:shadow-rose-500/40 hover:scale-[1.02] border border-rose-400/20"
                     >
                       End Conversation & Generate Summary
                     </button>
                   )}
                   <div className="flex gap-3">
-                    <div className="flex-1 relative">
+                    <div className="flex-1 relative group">
                       <input
                         type="text"
                         value={inputMessage}
@@ -450,14 +587,14 @@ const AIChatbot = () => {
                         onKeyPress={(e) => e.key === 'Enter' && sendMessage()}
                         placeholder="Message AI Assistant..."
                         disabled={loading}
-                        className="w-full px-4 py-3 pr-12 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        className="w-full px-6 py-4 pr-14 rounded-2xl backdrop-blur-2xl bg-white/10 border border-white/10 text-white placeholder-white/40 focus:outline-none focus:border-violet-500/50 focus:bg-white/15 transition-all duration-300 shadow-xl"
                       />
                       <button
                         onClick={toggleVoiceInput}
-                        className={`absolute right-3 top-1/2 transform -translate-y-1/2 p-1 rounded transition-colors ${
+                        className={`absolute right-4 top-1/2 transform -translate-y-1/2 p-2 rounded-xl transition-all duration-300 ${
                           isRecording
-                            ? 'text-red-500 animate-pulse'
-                            : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-300'
+                            ? 'text-rose-400 bg-rose-500/20 animate-pulse'
+                            : 'text-white/40 hover:text-white/70 hover:bg-white/10'
                         }`}
                       >
                         <Mic className="w-5 h-5" />
@@ -466,10 +603,10 @@ const AIChatbot = () => {
                     <button
                       onClick={sendMessage}
                       disabled={loading || !inputMessage.trim()}
-                      className="px-6 py-3 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-lg hover:opacity-90 transition-all duration-200 disabled:opacity-50 shadow-lg flex items-center gap-2"
+                      className="px-8 py-4 bg-gradient-to-r from-violet-600 to-sky-600 hover:from-violet-500 hover:to-sky-500 text-white rounded-2xl transition-all duration-300 disabled:opacity-50 shadow-xl shadow-sky-500/25 hover:shadow-sky-500/40 hover:scale-105 flex items-center gap-2 disabled:hover:scale-100 border border-violet-400/20"
                     >
                       {loading ? (
-                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                       ) : (
                         <Send className="w-5 h-5" />
                       )}
@@ -482,78 +619,62 @@ const AIChatbot = () => {
 
           {/* History Tab */}
           {activeTab === 'history' && (
-            <div className="h-full overflow-y-auto p-6">
+            <div className="h-full overflow-y-auto p-8">
               <div className="max-w-6xl mx-auto">
                 <div className="flex items-center justify-between mb-8">
-                  <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Conversation History</h2>
+                  <h2 className="text-3xl font-bold text-white">Conversation History</h2>
                   <button
                     onClick={fetchConversations}
-                    className="px-4 py-2 bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                    className="px-6 py-3 backdrop-blur-xl bg-white/10 hover:bg-white/15 text-white rounded-2xl transition-all duration-300 border border-white/10 shadow-lg hover:scale-105"
                   >
                     Refresh
                   </button>
                 </div>
 
                 {conversations.length === 0 ? (
-                  <div className="text-center py-12">
-                    <Archive className="w-16 h-16 text-gray-400 dark:text-gray-600 mx-auto mb-4" />
-                    <p className="text-gray-500 dark:text-gray-400 text-lg">No conversations yet</p>
-                    <p className="text-gray-400 dark:text-gray-500">Start a new chat to see your history here</p>
+                  <div className="text-center py-20">
+                    <div className="relative inline-block mb-6">
+                      <div className="absolute inset-0 bg-violet-500/20 rounded-full blur-2xl"></div>
+                      <Archive className="relative w-20 h-20 text-white/30" />
+                    </div>
+                    <p className="text-white/60 text-xl mb-2">No conversations yet</p>
+                    <p className="text-white/40">Start a new chat to see your history here</p>
                   </div>
                 ) : (
-                  <div className="grid gap-4">
+                  <div className="grid gap-5">
                     {conversations.map(conv => (
                       <div
                         key={conv.id}
-                        className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6 hover:shadow-lg transition-all duration-200 cursor-pointer"
+                        className="group backdrop-blur-xl bg-white/5 hover:bg-white/10 rounded-3xl border border-white/10 hover:border-white/20 p-6 transition-all duration-300 cursor-pointer hover:scale-[1.02] shadow-lg hover:shadow-xl"
                         onClick={() => {
                           fetchConversationDetails(conv.id);
-                          setShowShareModal(true);
+                          setSelectedConversation(conv);
                         }}
                       >
-                        <div className="flex items-start justify-between mb-3">
+                        <div className="flex items-start justify-between mb-4">
                           <div className="flex-1">
-                            <h3 className="font-semibold text-gray-900 dark:text-white mb-2">
+                            <h3 className="font-semibold text-white text-lg mb-3">
                               {conv.title || `Conversation #${conv.id}`}
                             </h3>
-                            <div className="flex items-center gap-3 text-sm">
-                              <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                            <div className="flex items-center gap-3 flex-wrap">
+                              <span className={`px-3 py-1.5 rounded-full text-xs font-medium backdrop-blur-xl ${
                                 conv.status === 'active'
-                                  ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
-                                  : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400'
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                  : 'bg-white/10 text-white/60 border border-white/10'
                               }`}>
                                 {conv.status}
                               </span>
-                              <span className="text-gray-500 dark:text-gray-400">
+                              <span className="text-white/50 text-sm flex items-center gap-1.5">
+                                <MessageSquare className="w-4 h-4" />
                                 {conv.message_count || 0} messages
                               </span>
-                              <span className="text-gray-500 dark:text-gray-400 flex items-center gap-1">
-                                <Clock className="w-3 h-3" />
+                              <span className="text-white/50 text-sm flex items-center gap-1.5">
+                                <Clock className="w-4 h-4" />
                                 {new Date(conv.start_timestamp).toLocaleDateString()}
                               </span>
                             </div>
                           </div>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                fetchConversationDetails(conv.id);
-                              }}
-                              className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-                            >
-                              <FileText className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                fetchConversationDetails(conv.id);
-                                setTimeout(() => exportConversation(selectedConversation, 'json'), 500);
-                              }}
-                              className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-                            >
-                              <Download className="w-4 h-4" />
-                            </button>
-                          </div>
+                          <ChevronRight className="w-5 h-5 text-white/30 group-hover:text-white/60 transition-colors" />
                         </div>
                       </div>
                     ))}
@@ -565,21 +686,27 @@ const AIChatbot = () => {
 
           {/* Query Tab */}
           {activeTab === 'query' && (
-            <div className="h-full overflow-y-auto p-6">
+            <div className="h-full overflow-y-auto p-8">
               <div className="max-w-4xl mx-auto">
-                <div className="text-center mb-8">
-                  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
+                                  <div className="text-center mb-10">
+                  <div className="relative inline-block mb-4">
+                    <div className="absolute inset-0 bg-gradient-to-r from-violet-500 to-sky-500 rounded-full blur-2xl opacity-50"></div>
+                    <div className="relative w-16 h-16 bg-gradient-to-br from-violet-600 to-sky-600 rounded-2xl flex items-center justify-center shadow-xl">
+                      <Search className="w-8 h-8 text-white" />
+                    </div>
+                  </div>
+                  <h2 className="text-4xl font-bold bg-gradient-to-r from-white via-violet-200 to-sky-200 bg-clip-text text-transparent mb-3">
                     Query Your Conversations
                   </h2>
-                  <p className="text-gray-600 dark:text-gray-400">
+                  <p className="text-white/60 text-lg">
                     Ask questions about your past conversations and get intelligent answers
                   </p>
                 </div>
 
-                <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6 mb-6">
-                  <div className="space-y-4">
+                <div className="backdrop-blur-xl bg-white/5 rounded-3xl border border-white/10 p-8 mb-6 shadow-xl">
+                  <div className="space-y-5">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      <label className="block text-sm font-medium text-white/80 mb-3">
                         Your Question
                       </label>
                       <textarea
@@ -587,18 +714,18 @@ const AIChatbot = () => {
                         onChange={(e) => setQueryInput(e.target.value)}
                         placeholder="What did I discuss about travel last month?..."
                         rows="4"
-                        className="w-full px-4 py-3 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 resize-none"
+                        className="w-full px-6 py-4 rounded-2xl backdrop-blur-xl bg-white/10 border border-white/10 text-white placeholder-white/40 focus:outline-none focus:border-violet-500/50 focus:bg-white/15 transition-all duration-300 resize-none shadow-inner"
                       />
                     </div>
 
                     <button
                       onClick={queryConversations}
                       disabled={queryLoading || !queryInput.trim()}
-                      className="w-full px-6 py-4 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-lg hover:opacity-90 transition-all duration-200 disabled:opacity-50 font-medium shadow-lg"
+                      className="w-full px-8 py-5 bg-gradient-to-r from-violet-600 to-sky-600 hover:from-violet-500 hover:to-sky-500 text-white rounded-2xl transition-all duration-300 disabled:opacity-50 font-medium shadow-xl shadow-sky-500/25 hover:shadow-sky-500/40 hover:scale-[1.02] disabled:hover:scale-100 border border-violet-400/20"
                     >
                       {queryLoading ? (
                         <div className="flex items-center justify-center gap-3">
-                          <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                          <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                           Analyzing Conversations...
                         </div>
                       ) : (
@@ -612,49 +739,49 @@ const AIChatbot = () => {
                 </div>
 
                 {queryResult && (
-                  <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
-                    <div className="flex items-center gap-3 mb-6">
-                      <div className="w-10 h-10 bg-gradient-to-r from-green-500 to-emerald-600 rounded-full flex items-center justify-center">
-                        <Sparkles className="w-5 h-5 text-white" />
+                  <div className="backdrop-blur-xl bg-white/5 rounded-3xl border border-white/10 p-8 shadow-xl">
+                    <div className="flex items-center gap-4 mb-8 pb-6 border-b border-white/10">
+                      <div className="relative">
+                        <div className="absolute inset-0 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full blur-xl opacity-50"></div>
+                        <div className="relative w-12 h-12 bg-gradient-to-br from-emerald-500 to-teal-600 rounded-2xl flex items-center justify-center shadow-lg">
+                          <Sparkles className="w-6 h-6 text-white" />
+                        </div>
                       </div>
                       <div>
-                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">AI Analysis Results</h3>
-                        <p className="text-sm text-gray-500 dark:text-gray-400">
+                        <h3 className="text-xl font-semibold text-white">AI Analysis Results</h3>
+                        <p className="text-sm text-white/50">
                           Found insights from {queryResult.conversations_analyzed} conversations
                         </p>
                       </div>
                     </div>
 
-                    <div className="prose prose-lg max-w-none dark:prose-invert">
-                      <div className="text-gray-700 dark:text-gray-300 leading-relaxed space-y-4">
-                        {formatQueryAnswer(queryResult.answer)}
-                      </div>
+                    <div className="space-y-5 mb-8">
+                      {formatQueryAnswer(queryResult.answer)}
                     </div>
 
-                    {/* Relevant Conversations */}
                     {queryResult.relevant_conversations?.length > 0 && (
-                      <div className="mt-8 pt-6 border-t border-gray-200 dark:border-gray-700">
-                        <h4 className="font-semibold text-gray-900 dark:text-white mb-4 flex items-center gap-2">
-                          <MessageSquare className="w-4 h-4" />
+                      <div className="pt-8 border-t border-white/10">
+                        <h4 className="font-semibold text-white mb-5 flex items-center gap-2 text-lg">
+                          <MessageSquare className="w-5 h-5" />
                           Relevant Conversations
                         </h4>
-                        <div className="grid gap-3">
+                        <div className="grid gap-4">
                           {queryResult.relevant_conversations.map(conv => (
                             <div
                               key={conv.id}
                               onClick={() => fetchConversationDetails(conv.id)}
-                              className="p-4 rounded-lg border border-gray-200 dark:border-gray-700 hover:border-blue-300 dark:hover:border-blue-700 cursor-pointer transition-all duration-200 hover:shadow-md bg-gray-500 dark:bg-gray-750"
+                              className="p-5 rounded-2xl backdrop-blur-xl bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 cursor-pointer transition-all duration-300 hover:scale-[1.02] shadow-lg"
                             >
                               <div className="flex items-center justify-between">
                                 <div className="flex-1">
-                                  <h5 className="font-medium text-gray-900 dark:text-white mb-1">
+                                  <h5 className="font-medium text-white mb-1">
                                     {conv.title}
                                   </h5>
-                                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                                  <p className="text-sm text-white/50">
                                     {conv.date}
                                   </p>
                                 </div>
-                                <ChevronDown className="w-4 h-4 text-gray-400 transform rotate-270" />
+                                <ChevronRight className="w-5 h-5 text-white/30" />
                               </div>
                             </div>
                           ))}
@@ -669,112 +796,129 @@ const AIChatbot = () => {
 
           {/* Analytics Tab */}
           {activeTab === 'analytics' && (
-            <div className="h-full overflow-y-auto p-6">
+            <div className="h-full overflow-y-auto p-8">
               <div className="max-w-6xl mx-auto">
-                <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-8">Analytics Dashboard</h2>
+                <h2 className="text-3xl font-bold text-white mb-8">Analytics Dashboard</h2>
 
                 {/* Stats Grid */}
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-                  <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-6 text-white shadow-lg">
-                    <div className="flex items-center justify-between">
-                      <MessageSquare className="w-8 h-8 opacity-90" />
-                      <span className="text-3xl font-bold">{analytics.total}</span>
+                  <div className="relative group">
+                    <div className="absolute inset-0 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-3xl blur-xl opacity-50 group-hover:opacity-75 transition-opacity"></div>
+                    <div className="relative backdrop-blur-xl bg-gradient-to-br from-blue-500/80 to-cyan-500/80 rounded-3xl p-6 border border-blue-400/20 shadow-xl hover:scale-105 transition-transform duration-300">
+                      <div className="flex items-center justify-between mb-3">
+                        <MessageSquare className="w-10 h-10 text-white/90" />
+                        <span className="text-4xl font-bold text-white">{analytics.total}</span>
+                      </div>
+                      <p className="text-blue-100 text-sm font-medium">Total Conversations</p>
                     </div>
-                    <p className="text-blue-100 text-sm mt-2">Total Conversations</p>
                   </div>
 
-                  <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl p-6 text-white shadow-lg">
-                    <div className="flex items-center justify-between">
-                      <Zap className="w-8 h-8 opacity-90" />
-                      <span className="text-3xl font-bold">{analytics.active}</span>
+                  <div className="relative group">
+                    <div className="absolute inset-0 bg-gradient-to-br from-emerald-500 to-teal-500 rounded-3xl blur-xl opacity-50 group-hover:opacity-75 transition-opacity"></div>
+                    <div className="relative backdrop-blur-xl bg-gradient-to-br from-emerald-500/80 to-teal-500/80 rounded-3xl p-6 border border-emerald-400/20 shadow-xl hover:scale-105 transition-transform duration-300">
+                      <div className="flex items-center justify-between mb-3">
+                        <Zap className="w-10 h-10 text-white/90" />
+                        <span className="text-4xl font-bold text-white">{analytics.active}</span>
+                      </div>
+                      <p className="text-emerald-100 text-sm font-medium">Active Chats</p>
                     </div>
-                    <p className="text-green-100 text-sm mt-2">Active Chats</p>
                   </div>
 
-                  <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl p-6 text-white shadow-lg">
-                    <div className="flex items-center justify-between">
-                      <FileText className="w-8 h-8 opacity-90" />
-                      <span className="text-3xl font-bold">{analytics.ended}</span>
+                  <div className="relative group">
+                    <div className="absolute inset-0 bg-gradient-to-br from-violet-500 to-sky-500 rounded-3xl blur-xl opacity-50 group-hover:opacity-75 transition-opacity"></div>
+                    <div className="relative backdrop-blur-xl bg-gradient-to-br from-violet-500/80 to-sky-500/80 rounded-3xl p-6 border border-violet-400/20 shadow-xl hover:scale-105 transition-transform duration-300">
+                      <div className="flex items-center justify-between mb-3">
+                        <FileText className="w-10 h-10 text-white/90" />
+                        <span className="text-4xl font-bold text-white">{analytics.ended}</span>
+                      </div>
+                      <p className="text-violet-100 text-sm font-medium">Completed</p>
                     </div>
-                    <p className="text-purple-100 text-sm mt-2">Completed</p>
                   </div>
 
-                  <div className="bg-gradient-to-br from-orange-500 to-orange-600 rounded-xl p-6 text-white shadow-lg">
-                    <div className="flex items-center justify-between">
-                      <TrendingUp className="w-8 h-8 opacity-90" />
-                      <span className="text-3xl font-bold">{analytics.avgMessages}</span>
+                  <div className="relative group">
+                    <div className="absolute inset-0 bg-gradient-to-br from-amber-500 to-orange-500 rounded-3xl blur-xl opacity-50 group-hover:opacity-75 transition-opacity"></div>
+                    <div className="relative backdrop-blur-xl bg-gradient-to-br from-amber-500/80 to-orange-500/80 rounded-3xl p-6 border border-amber-400/20 shadow-xl hover:scale-105 transition-transform duration-300">
+                      <div className="flex items-center justify-between mb-3">
+                        <TrendingUp className="w-10 h-10 text-white/90" />
+                        <span className="text-4xl font-bold text-white">{analytics.avgMessages}</span>
+                      </div>
+                      <p className="text-amber-100 text-sm font-medium">Avg Messages</p>
                     </div>
-                    <p className="text-orange-100 text-sm mt-2">Avg Messages</p>
                   </div>
                 </div>
 
-                {/* Additional Analytics Content */}
+                {/* Additional Analytics */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
-                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Conversation Status</h3>
-                    <div className="space-y-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-gray-700 dark:text-gray-300">Active Conversations</span>
-                        <div className="flex items-center gap-3">
-                          <div className="w-24 h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                            <div 
-                              className="h-full bg-green-500 rounded-full transition-all duration-500"
-                              style={{ width: `${analytics.total > 0 ? (analytics.active / analytics.total) * 100 : 0}%` }}
-                            />
-                          </div>
-                          <span className="text-sm font-medium text-gray-900 dark:text-white w-8">
-                            {analytics.active}
-                          </span>
+                  <div className="backdrop-blur-xl bg-white/5 rounded-3xl border border-white/10 p-8 shadow-xl">
+                    <h3 className="text-xl font-semibold text-white mb-6 flex items-center gap-2">
+                      <BarChart3 className="w-5 h-5" />
+                      Conversation Status
+                    </h3>
+                    <div className="space-y-6">
+                      <div>
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-white/80">Active Conversations</span>
+                          <span className="text-lg font-bold text-white">{analytics.active}</span>
+                        </div>
+                        <div className="h-3 bg-white/10 rounded-full overflow-hidden backdrop-blur-xl">
+                          <div 
+                            className="h-full bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full transition-all duration-1000 shadow-lg"
+                            style={{ width: `${analytics.total > 0 ? (analytics.active / analytics.total) * 100 : 0}%` }}
+                          />
                         </div>
                       </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-gray-700 dark:text-gray-300">Completed Conversations</span>
-                        <div className="flex items-center gap-3">
-                          <div className="w-24 h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                            <div 
-                              className="h-full bg-blue-500 rounded-full transition-all duration-500"
-                              style={{ width: `${analytics.total > 0 ? (analytics.ended / analytics.total) * 100 : 0}%` }}
-                            />
-                          </div>
-                          <span className="text-sm font-medium text-gray-900 dark:text-white w-8">
-                            {analytics.ended}
-                          </span>
+                      <div>
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-white/80">Completed Conversations</span>
+                          <span className="text-lg font-bold text-white">{analytics.ended}</span>
+                        </div>
+                        <div className="h-3 bg-white/10 rounded-full overflow-hidden backdrop-blur-xl">
+                          <div 
+                            className="h-full bg-gradient-to-r from-blue-500 to-cyan-500 rounded-full transition-all duration-1000 shadow-lg"
+                            style={{ width: `${analytics.total > 0 ? (analytics.ended / analytics.total) * 100 : 0}%` }}
+                          />
                         </div>
                       </div>
                     </div>
                   </div>
 
-                  <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
-                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Quick Insights</h3>
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-3 p-3 bg-gray-100 dark:bg-gray-750 rounded-lg">
-                        <div className="w-8 h-8 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center">
-                          <MessageSquare className="w-4 h-4 text-blue-600 dark:text-blue-800" />
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-gray-900 dark:text-black">
-                            {analytics.totalMessages} total messages
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3 p-3 bg-gray-100 dark:bg-gray-750 rounded-lg">
-                        <div className="w-8 h-8 bg-green-100 dark:bg-green-900/30 rounded-full flex items-center justify-center">
-                          <TrendingUp className="w-4 h-4 text-green-600 dark:text-green-800" />
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-gray-900 dark:text-black">
-                            {analytics.avgMessages} avg messages per chat
-                          </p>
+                  <div className="backdrop-blur-xl bg-white/5 rounded-3xl border border-white/10 p-8 shadow-xl">
+                    <h3 className="text-xl font-semibold text-white mb-6 flex items-center gap-2">
+                      <Sparkles className="w-5 h-5" />
+                      Quick Insights
+                    </h3>
+                    <div className="space-y-4">
+                      <div className="backdrop-blur-xl bg-white/5 hover:bg-white/10 rounded-2xl p-4 transition-all duration-300 border border-white/10">
+                        <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-2xl flex items-center justify-center shadow-lg">
+                            <MessageSquare className="w-6 h-6 text-white" />
+                          </div>
+                          <div>
+                            <p className="text-sm text-white/50">Total Messages</p>
+                            <p className="text-lg font-bold text-white">{analytics.totalMessages}</p>
+                          </div>
                         </div>
                       </div>
-                      <div className="flex items-center gap-3 p-3 bg-gray-100 dark:bg-gray-750 rounded-lg">
-                        <div className="w-8 h-8 bg-purple-100 dark:bg-purple-900/30 rounded-full flex items-center justify-center">
-                          <Bookmark className="w-4 h-4 text-purple-600 dark:text-purple-800" />
+                      <div className="backdrop-blur-xl bg-white/5 hover:bg-white/10 rounded-2xl p-4 transition-all duration-300 border border-white/10">
+                        <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 bg-gradient-to-br from-emerald-500 to-teal-500 rounded-2xl flex items-center justify-center shadow-lg">
+                            <TrendingUp className="w-6 h-6 text-white" />
+                          </div>
+                          <div>
+                            <p className="text-sm text-white/50">Average per Chat</p>
+                            <p className="text-lg font-bold text-white">{analytics.avgMessages} messages</p>
+                          </div>
                         </div>
-                        <div>
-                          <p className="text-sm font-medium text-gray-900 dark:text-black">
-                            {bookmarkedMessages.size} bookmarked messages
-                          </p>
+                      </div>
+                      <div className="backdrop-blur-xl bg-white/5 hover:bg-white/10 rounded-2xl p-4 transition-all duration-300 border border-white/10">
+                        <div className="flex items-center gap-4">
+                          <div className="w-12 h-12 bg-gradient-to-br from-violet-500 to-sky-500 rounded-2xl flex items-center justify-center shadow-lg">
+                            <Bookmark className="w-6 h-6 text-white" />
+                          </div>
+                          <div>
+                            <p className="text-sm text-white/50">Bookmarked</p>
+                            <p className="text-lg font-bold text-white">{bookmarkedMessages.size} messages</p>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -788,330 +932,204 @@ const AIChatbot = () => {
 
       {/* Notification */}
       {notification && (
-        <div className={`fixed top-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg animate-fade-in ${
+        <div className={`fixed top-6 right-6 z-50 backdrop-blur-xl rounded-2xl shadow-2xl animate-fade-in border ${
           notification.type === 'success' 
-            ? 'bg-green-500 text-white' 
-            : 'bg-red-500 text-white'
+            ? 'bg-emerald-500/90 border-emerald-400/20 text-white' 
+            : 'bg-rose-500/90 border-rose-400/20 text-white'
         }`}>
-          {notification.message}
+          <div className="px-6 py-4 flex items-center gap-3">
+            <div className={`w-2 h-2 rounded-full ${
+              notification.type === 'success' ? 'bg-white' : 'bg-white'
+            } animate-pulse`}></div>
+            <span className="font-medium">{notification.message}</span>
+          </div>
         </div>
       )}
 
-      {/* Share Modal */}
+      {/* Conversation Details Modal */}
       {selectedConversation && (
-  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col">
-      {/* Header */}
-      <div className="p-6 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-gradient-to-r from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
-            <MessageSquare className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <h3 className="text-xl font-bold text-gray-900 dark:text-white">
-              {selectedConversation.title || `Conversation #${selectedConversation.id}`}
-            </h3>
-            <div className="flex items-center gap-4 text-sm text-gray-500 dark:text-gray-400 mt-1">
-              <span className="flex items-center gap-1">
-                <Clock className="w-4 h-4" />
-                {new Date(selectedConversation.start_timestamp).toLocaleDateString()}
-              </span>
-              <span>{selectedConversation.messages.length} messages</span>
-              <span className={`px-2 py-1 rounded-full text-xs font-medium ${
-                selectedConversation.status === 'active'
-                  ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400'
-                  : 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-400'
-              }`}>
-                {selectedConversation.status}
-              </span>
-            </div>
-          </div>
-        </div>
-        <button
-          onClick={() => setSelectedConversation(null)}
-          className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-        >
-          <X className="w-5 h-5 text-gray-500 dark:text-gray-400" />
-        </button>
-      </div>
-
-      {/* Split Content */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Panel - Chat Messages */}
-        <div className="flex-1 border-r border-gray-200 dark:border-gray-700 overflow-hidden flex flex-col">
-          <div className="p-4 border-b border-gray-200 dark:border-gray-700">
-            <h4 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-              <MessageSquare className="w-4 h-4" />
-              Conversation
-            </h4>
-          </div>
-          <div className="flex-1 overflow-y-auto p-6">
-            <div className="space-y-6 max-w-4xl mx-auto">
-              {selectedConversation.messages?.length === 0 ? (
-                <div className="text-center py-12">
-                  <MessageSquare className="w-12 h-12 text-gray-400 dark:text-gray-600 mx-auto mb-4" />
-                  <p className="text-gray-500 dark:text-gray-400">No messages in this conversation</p>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-6 animate-fade-in">
+          <div className="backdrop-blur-2xl bg-white/10 border border-white/20 rounded-3xl shadow-2xl max-w-6xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+            {/* Header */}
+            <div className="p-6 border-b border-white/10 flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 bg-gradient-to-br from-violet-600 to-sky-600 rounded-2xl flex items-center justify-center shadow-lg">
+                  <MessageSquare className="w-6 h-6 text-white" />
                 </div>
-              ) : (
-                selectedConversation.messages?.map((msg, idx) => (
-                  <div key={idx} className={`flex gap-4 ${msg.sender === 'user' ? 'flex-row-reverse' : ''}`}>
-                    <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${
-                      msg.sender === 'user' 
-                        ? 'bg-blue-500 shadow-lg' 
-                        : 'bg-gradient-to-r from-purple-500 to-pink-500 shadow-lg'
+                <div>
+                  <h3 className="text-xl font-bold text-white">
+                    {selectedConversation.title || `Conversation #${selectedConversation.id}`}
+                  </h3>
+                  <div className="flex items-center gap-4 text-sm text-white/50 mt-1">
+                    <span className="flex items-center gap-1.5">
+                      <Clock className="w-4 h-4" />
+                      {new Date(selectedConversation.start_timestamp).toLocaleDateString()}
+                    </span>
+                    <span>{selectedConversation.messages?.length || 0} messages</span>
+                    <span className={`px-2.5 py-1 rounded-full text-xs font-medium backdrop-blur-xl ${
+                      selectedConversation.status === 'active'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        : 'bg-white/10 text-white/60 border border-white/10'
                     }`}>
-                      {msg.sender === 'user' ? (
-                        <User className="w-4 h-4 text-white" />
-                      ) : (
-                        <Bot className="w-4 h-4 text-white" />
-                      )}
-                    </div>
-                    <div className={`flex-1 max-w-[80%] ${msg.sender === 'user' ? 'text-right' : ''}`}>
-                      <div className={`inline-block px-4 py-3 rounded-2xl shadow-sm ${
-                        msg.sender === 'user'
-                          ? 'bg-blue-500 text-white rounded-br-none shadow-blue-500/25'
-                          : 'bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-white rounded-bl-none border border-gray-100 dark:border-gray-600'
-                      }`}>
-                        <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
-                        <p className={`text-xs mt-2 ${
-                          msg.sender === 'user' 
-                            ? 'text-blue-100' 
-                            : 'text-gray-500 dark:text-gray-400'
-                        }`}>
-                          {new Date(msg.timestamp).toLocaleTimeString()}
+                      {selectedConversation.status}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => setSelectedConversation(null)}
+                className="p-2.5 rounded-xl backdrop-blur-xl bg-white/5 hover:bg-white/10 transition-all duration-300 text-white/70 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Split Content */}
+            <div className="flex-1 flex overflow-hidden">
+              {/* Left Panel - Messages */}
+              <div className="flex-1 border-r border-white/10 overflow-hidden flex flex-col">
+                <div className="p-4 border-b border-white/10">
+                  <h4 className="font-semibold text-white flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4" />
+                    Conversation
+                  </h4>
+                </div>
+                <div className="flex-1 overflow-y-auto p-6">
+                  <div className="space-y-6">
+                    {selectedConversation.messages?.length === 0 ? (
+                      <div className="text-center py-12">
+                        <MessageSquare className="w-12 h-12 text-white/20 mx-auto mb-4" />
+                        <p className="text-white/40">No messages in this conversation</p>
+                      </div>
+                    ) : (
+                      selectedConversation.messages?.map((msg, idx) => (
+                        <div key={idx} className={`flex gap-4 ${msg.sender === 'user' ? 'flex-row-reverse' : ''}`}>
+                          <div className={`w-10 h-10 rounded-2xl flex items-center justify-center flex-shrink-0 shadow-lg ${
+                            msg.sender === 'user' 
+                              ? 'bg-gradient-to-br from-blue-500 to-cyan-500' 
+                              : 'bg-gradient-to-br from-violet-500 to-sky-600'
+                          }`}>
+                            {msg.sender === 'user' ? (
+                              <User className="w-5 h-5 text-white" />
+                            ) : (
+                              <Bot className="w-5 h-5 text-white" />
+                            )}
+                          </div>
+                          <div className={`flex-1 max-w-[80%] ${msg.sender === 'user' ? 'text-right' : ''}`}>
+                            <div className={`inline-block backdrop-blur-2xl rounded-3xl shadow-lg ${
+                              msg.sender === 'user'
+                                ? 'bg-gradient-to-br from-blue-500/80 to-cyan-500/80 text-white rounded-br-md border border-blue-400/20'
+                                : 'bg-white/10 text-white rounded-bl-md border border-white/10'
+                            }`}>
+                              <p className="px-6 py-4 text-sm leading-relaxed whitespace-pre-wrap">{msg.content}</p>
+                              <p className={`px-6 pb-3 text-xs ${
+                                msg.sender === 'user' ? 'text-blue-100' : 'text-white/40'
+                              }`}>
+                                {new Date(msg.timestamp).toLocaleTimeString()}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Right Panel - Summary */}
+              <div className="w-96 flex-shrink-0 overflow-hidden flex flex-col">
+                <div className="p-4 border-b border-white/10">
+                  <h4 className="font-semibold text-white flex items-center gap-2">
+                    <Sparkles className="w-4 h-4" />
+                    Summary & Insights
+                  </h4>
+                </div>
+                <div className="flex-1 overflow-y-auto p-6">
+                  <div className="space-y-6">
+                    {selectedConversation.summary && (
+                      <div className="backdrop-blur-xl bg-gradient-to-br from-violet-500/20 to-sky-500/20 border border-violet-400/30 rounded-2xl p-5">
+                        <div className="flex items-center gap-2 mb-4">
+                          <Bot className="w-5 h-5 text-violet-300" />
+                          <h5 className="font-semibold text-white">AI Summary</h5>
+                        </div>
+                        <p className="text-sm text-white/80 leading-relaxed">
+                          {selectedConversation.summary}
                         </p>
+                      </div>
+                    )}
+
+                    <div className="backdrop-blur-xl bg-white/5 rounded-2xl p-5 border border-white/10">
+                      <h5 className="font-semibold text-white mb-4 flex items-center gap-2">
+                        <BarChart3 className="w-4 h-4" />
+                        Stats
+                      </h5>
+                      <div className="space-y-3">
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-white/60">Total Messages</span>
+                          <span className="font-semibold text-white">
+                            {selectedConversation.messages?.length || 0}
+                          </span>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm text-white/60">Started</span>
+                          <span className="font-semibold text-white text-xs">
+                            {new Date(selectedConversation.start_timestamp).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="backdrop-blur-xl bg-white/5 rounded-2xl p-5 border border-white/10">
+                      <h5 className="font-semibold text-white mb-4">Quick Actions</h5>
+                      <div className="space-y-2">
+                        <button
+                          onClick={shareConversation}
+                          className="w-full flex items-center gap-3 px-4 py-3 backdrop-blur-xl bg-white/5 hover:bg-white/10 text-white rounded-xl transition-all duration-300 border border-white/10"
+                        >
+                          <Share2 className="w-4 h-4" />
+                          Share
+                        </button>
+                        <button
+                          onClick={() => exportConversation(selectedConversation, 'json')}
+                          className="w-full flex items-center gap-3 px-4 py-3 backdrop-blur-xl bg-white/5 hover:bg-white/10 text-white rounded-xl transition-all duration-300 border border-white/10"
+                        >
+                          <Download className="w-4 h-4" />
+                          Export JSON
+                        </button>
+                        <button
+                          onClick={() => exportConversation(selectedConversation, 'markdown')}
+                          className="w-full flex items-center gap-3 px-4 py-3 backdrop-blur-xl bg-white/5 hover:bg-white/10 text-white rounded-xl transition-all duration-300 border border-white/10"
+                        >
+                          <FileText className="w-4 h-4" />
+                          Export MD
+                        </button>
                       </div>
                     </div>
                   </div>
-                ))
-              )}
+                </div>
+              </div>
             </div>
           </div>
         </div>
+      )}
 
-        {/* Right Panel - Summary & Analytics */}
-        <div className="w-96 flex-shrink-0 overflow-hidden flex flex-col">
-          <div className="p-4 border-b border-gray-200 dark:border-gray-700">
-            <h4 className="font-semibold text-gray-900 dark:text-white flex items-center gap-2">
-              <Sparkles className="w-4 h-4" />
-              Summary & Insights
-            </h4>
-          </div>
-          <div className="flex-1 overflow-y-auto p-6">
-            <div className="space-y-6">
-              {/* AI Summary */}
-              {selectedConversation.summary && (
-                <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 border border-blue-200 dark:border-blue-800 rounded-xl p-4">
-                  <div className="flex items-center gap-2 mb-3">
-                    <Bot className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                    <h5 className="font-semibold text-blue-900 dark:text-blue-100">AI Summary</h5>
-                  </div>
-                  <p className="text-sm text-blue-800 dark:text-blue-200 leading-relaxed">
-                    {selectedConversation.summary.split('. ').map((sentence, index) => (
-                    <div key={index} className="flex items-start">
-                      <div className="w-1.5 h-1.5 bg-blue-400 rounded-full mt-2 mr-3 flex-shrink-0" />
-                      <span>
-                        {sentence.split(/(\*\*.*?\*\*)/g).map((part, partIndex) => 
-                          part.startsWith('**') && part.endsWith('**') ? (
-                            <span key={partIndex} className="font-semibold text-blue-950 dark:text-blue-50">
-                              {part.slice(2, -2)}
-                            </span>
-                          ) : (
-                            part
-                          )
-                        )}
-                        {index < selectedConversation.summary.split('. ').length - 1 ? '.' : ''}
-                      </span>
-                    </div>
-                  ))}
-                  </p>
-                </div>
-              )}
-
-              {/* Conversation Stats */}
-              <div className="bg-gray-50 dark:bg-gray-700 rounded-xl p-4">
-                <h5 className="font-semibold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4" />
-                  Conversation Stats
-                </h5>
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm text-gray-600 dark:text-gray-400">Total Messages</span>
-                    <span className="font-semibold text-gray-900 dark:text-white">
-                      {selectedConversation.messages?.length || 0}
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm text-gray-600 dark:text-gray-400">Duration</span>
-                    <span className="font-semibold text-gray-900 dark:text-white">
-                      {selectedConversation.duration_minutes 
-                        ? `${selectedConversation.duration_minutes} min` 
-                        : 'N/A'
-                      }
-                    </span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm text-gray-600 dark:text-gray-400">Started</span>
-                    <span className="font-semibold text-gray-900 dark:text-white text-xs">
-                      {new Date(selectedConversation.start_timestamp).toLocaleDateString()}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Message Distribution */}
-              <div className="bg-gray-50 dark:bg-gray-700 rounded-xl p-4">
-                <h5 className="font-semibold text-gray-900 dark:text-white mb-3">Message Distribution</h5>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
-                      <span className="text-sm text-gray-600 dark:text-gray-400">Your Messages</span>
-                    </div>
-                    <span className="font-semibold text-gray-900 dark:text-white">
-                      {selectedConversation.messages?.filter(m => m.sender === 'user').length || 0}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <div className="w-3 h-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full"></div>
-                      <span className="text-sm text-gray-600 dark:text-gray-400">AI Responses</span>
-                    </div>
-                    <span className="font-semibold text-gray-900 dark:text-white">
-                      {selectedConversation.messages?.filter(m => m.sender === 'ai').length || 0}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Quick Actions */}
-              <div className="bg-gray-50 dark:bg-gray-700 rounded-xl p-4">
-                <h5 className="font-semibold text-gray-900 dark:text-white mb-3">Quick Actions</h5>
-                <div className="space-y-2">
-                  <button
-                    onClick={shareConversation}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm bg-white dark:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-500 transition-colors"
-                  >
-                    <Share2 className="w-4 h-4" />
-                    Share Conversation
-                  </button>
-                  <button
-                    onClick={() => exportConversation(selectedConversation, 'json')}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm bg-white dark:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-500 transition-colors"
-                  >
-                    <Download className="w-4 h-4" />
-                    Export as JSON
-                  </button>
-                  <button
-                    onClick={() => exportConversation(selectedConversation, 'markdown')}
-                    className="w-full flex items-center gap-2 px-3 py-2 text-sm bg-white dark:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-500 transition-colors"
-                  >
-                    <FileText className="w-4 h-4" />
-                    Export as Markdown
-                  </button>
-                </div>
-              </div>
-
-              {!selectedConversation.summary && (
-                <div className="text-center py-8">
-                  <Sparkles className="w-8 h-8 text-gray-400 dark:text-gray-600 mx-auto mb-2" />
-                  <p className="text-gray-500 dark:text-gray-400 text-sm">
-                    No summary available for this conversation
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Footer Actions */}
-      <div className="p-4 border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700">
-        <div className="flex gap-3 justify-end">
-          <button
-            onClick={shareConversation}
-            className="px-6 py-2 bg-gradient-to-r from-blue-500 to-purple-600 text-white rounded-lg hover:opacity-90 transition-opacity flex items-center gap-2 font-medium"
-          >
-            <Share2 className="w-4 h-4" />
-            Share Link
-          </button>
-          <button
-            onClick={() => exportConversation(selectedConversation, 'json')}
-            className="px-6 py-2 bg-white dark:bg-gray-600 border border-gray-300 dark:border-gray-500 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-500 transition-colors flex items-center gap-2"
-          >
-            <Download className="w-4 h-4" />
-            Export JSON
-          </button>
-          <button
-            onClick={() => exportConversation(selectedConversation, 'markdown')}
-            className="px-6 py-2 bg-white dark:bg-gray-600 border border-gray-300 dark:border-gray-500 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-500 transition-colors flex items-center gap-2"
-          >
-            <FileText className="w-4 h-4" />
-            Export MD
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-)}
+      <style jsx>{`
+        @keyframes fade-in {
+          from {
+            opacity: 0;
+            transform: translateY(10px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+        .animate-fade-in {
+          animation: fade-in 0.3s ease-out;
+        }
+      `}</style>
     </div>
   );
 };
 
 export default AIChatbot;
-
-const formatQueryAnswer = (answerText) => {
-  if (!answerText) return null;
-
-  // Split the answer into logical parts
-  const parts = answerText.split(/(\d+\.\s+\*\*.*?\*\*)/g);
-  
-  return parts.map((part, index) => {
-    // Handle numbered list items with bold titles
-    const numberedMatch = part.match(/^(\d+)\.\s+\*\*(.*?)\*\*\s*-\s*(.*)$/);
-    if (numberedMatch) {
-      const [, number, title, content] = numberedMatch;
-      return (
-        <div key={index} className="bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-900/10 dark:to-emerald-900/10 border border-green-100 dark:border-green-800 rounded-xl p-4">
-          <div className="flex items-start gap-3">
-            <div className="w-6 h-6 bg-gradient-to-r from-green-500 to-emerald-600 rounded-full flex items-center justify-center flex-shrink-0">
-              <span className="text-xs font-bold text-white">{number}</span>
-            </div>
-            <div className="flex-1">
-              <h4 className="font-semibold text-green-900 dark:text-green-100 mb-2">
-                {title}
-              </h4>
-              <p className="text-green-800 dark:text-green-200 text-sm leading-relaxed">
-                {content}
-              </p>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    // Handle regular bold text
-    const boldProcessed = part.split(/(\*\*.*?\*\*)/g).map((segment, segIndex) => {
-      if (segment.startsWith('**') && segment.endsWith('**')) {
-        const boldText = segment.slice(2, -2);
-        return (
-          <span key={segIndex} className="font-semibold text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-800/30 px-1.5 py-0.5 rounded">
-            {boldText}
-          </span>
-        );
-      }
-      return segment;
-    });
-
-    // Handle regular paragraphs
-    if (part.trim() && !part.match(/^\d+\./)) {
-      return (
-        <p key={index} className="text-gray-700 dark:text-gray-300 leading-relaxed">
-          {boldProcessed}
-        </p>
-      );
-    }
-
-    return null;
-  }).filter(Boolean);
-};

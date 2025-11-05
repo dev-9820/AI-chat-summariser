@@ -8,6 +8,7 @@ urlpatterns = [
     
     # POST APIs
     path('send-message/', views.send_message, name='send_message'),
+    path('send-message-stream/', views.send_message_stream, name='send_message_stream'),  # NEW
     path('end-conversation/', views.end_conversation, name='end_conversation'),
     path('query-conversations/', views.query_conversations, name='query_conversations'),
 ]
